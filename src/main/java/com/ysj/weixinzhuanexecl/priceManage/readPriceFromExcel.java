@@ -1,6 +1,7 @@
 package com.ysj.weixinzhuanexecl.priceManage;
 
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.openxml4j.exceptions.NotOfficeXmlFileException;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
@@ -17,7 +18,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class readPriceFromExcel {
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) {
         // 源文件夹路径
         String sourceFolder = "C:\\Users\\sideyu\\Desktop\\tmp\\";
         // 输出文件夹路径
@@ -32,13 +33,19 @@ public class readPriceFromExcel {
         String outputFileName = formattedDate + "汇总价格.xlsx";
         String outputFilePath = outputFolderPath + File.separator + outputFileName;
 
-        // 提取货号和单价
-        Map<String, Double> priceMap = extractPricesFromFolder(sourceFolder);
+        try {
+            // 提取货号和单价
+            Map<String, Double> priceMap = extractPricesFromFolder(sourceFolder);
 
-        // 生成新的 Excel 文件
-        createSummaryExcel(priceMap, outputFilePath);
+            // 生成新的 Excel 文件
+            createSummaryExcel(priceMap, outputFilePath);
 
-        System.out.println("提取完成，结果已保存到: " + outputFilePath);
+            System.out.println("提取完成，结果已保存到: " + outputFilePath);
+        } catch (IOException e) {
+            System.err.println("处理文件时发生 IO 异常: " + e.getMessage());
+        } catch (IllegalArgumentException e) {
+            System.err.println("参数错误: " + e.getMessage());
+        }
     }
 
     /**
@@ -69,7 +76,11 @@ public class readPriceFromExcel {
                 traverseFolder(file, priceMap);
             } else if (file.isFile() && (file.getName().endsWith(".xlsx") || file.getName().endsWith(".xls"))) {
                 // 处理 Excel 文件
-                extractPricesFromExcel(file, priceMap);
+                try {
+                    extractPricesFromExcel(file, priceMap);
+                } catch (IOException e) {
+                    System.err.println("处理文件 " + file.getName() + " 时发生错误: " + e.getMessage());
+                }
             }
         }
     }
@@ -78,8 +89,10 @@ public class readPriceFromExcel {
      * 从 Excel 文件中提取货号和单价
      */
     private static void extractPricesFromExcel(File excelFile, Map<String, Double> priceMap) throws IOException {
-        Workbook workbook;
-        try (FileInputStream fileInputStream = new FileInputStream(excelFile)) {
+        Workbook workbook = null;
+        FileInputStream fileInputStream = null;
+        try {
+            fileInputStream = new FileInputStream(excelFile);
             // 根据文件扩展名选择 Workbook 实现
             if (excelFile.getName().endsWith(".xlsx")) {
                 workbook = new XSSFWorkbook(fileInputStream); // 处理 .xlsx 文件
@@ -89,80 +102,93 @@ public class readPriceFromExcel {
                 System.err.println("不支持的文件格式: " + excelFile.getName());
                 return;
             }
+
+            Sheet sheet = workbook.getSheetAt(0); // 读取第一个工作表
+
+            // 1. 查找表头行
+            int headerRowIndex = findHeaderRow(sheet);
+            if (headerRowIndex == -1) {
+                System.err.println("未找到表头行（文件: " + excelFile.getName() + "）");
+                return;
+            }
+
+            // 2. 查找货号和单价列的索引
+            Row headerRow = sheet.getRow(headerRowIndex);
+            int skuColumn = -1; // 货号列索引
+            int priceColumn = -1; // 单价列索引
+            for (Cell cell : headerRow) {
+                if (skuColumn != -1 && priceColumn != -1) {
+                    break;
+                }
+                String header = getCellValueAsString(cell); // 获取单元格值
+                if (header.equals("货号") || header.equals("商品编号") || header.contains("名称")) {
+                    skuColumn = cell.getColumnIndex();
+                } else if (header.contains("单价") || header.contains("价格")) {
+                    priceColumn = cell.getColumnIndex();
+                }
+            }
+
+            if (skuColumn == -1 || priceColumn == -1) {
+                System.err.println("未找到货号或单价列（文件: " + excelFile.getName() + "）");
+                return;
+            }
+
+            // 3. 提取数据
+            for (int i = headerRowIndex + 1; i <= sheet.getLastRowNum(); i++) {
+                Row row = sheet.getRow(i);
+                if (row == null) {
+                    continue; // 跳过空行
+                }
+
+                Cell skuCell = row.getCell(skuColumn); // 货号列
+                Cell priceCell = row.getCell(priceColumn); // 价格列
+
+                if (skuCell == null || priceCell == null) {
+                    continue; // 跳过空单元格
+                }
+
+                // 提取货号（兼容字符串和数值类型）
+                String sku = getCellValueAsString(skuCell).trim();
+
+                // 忽略货号为空的行
+                if (sku.isEmpty()) {
+                    continue;
+                }
+
+                // 提取价格（兼容字符串和数值类型）
+                double price;
+                try {
+                    price = getCellValueAsNumeric(priceCell);
+                } catch (NumberFormatException e) {
+                    System.err.println("价格格式错误（货号: " + sku + ", 文件: " + excelFile.getName() + "）: " + e.getMessage());
+                    continue;
+                }
+
+                // 保存有效数据
+                if (price <= 100) {
+                    priceMap.put(sku, price);
+                } else {
+                    System.err.println("忽略超过100元的价格（货号: " + sku + ", 价格: " + price + "）");
+                }
+            }
+        } catch (NotOfficeXmlFileException e) {
+            System.err.println("文件 " + excelFile.getName() + " 不是有效的 OOXML 文件，跳过该文件。错误信息: " + e.getMessage());
+        } finally {
+            if (workbook != null) {
+                try {
+                    workbook.close();
+                } catch (IOException e) {
+                    System.err.println("关闭工作簿时发生错误: " + e.getMessage());
+                }
+            }
+            if (fileInputStream != null) {
+                try {
+                    fileInputStream.close();
+                } catch (IOException e) {
+                    System.err.println("关闭文件输入流时发生错误: " + e.getMessage());
+                }
+            }
         }
-
-        Sheet sheet = workbook.getSheetAt(0); // 读取第一个工作表
-
-        // 1. 查找表头行
-        int headerRowIndex = findHeaderRow(sheet);
-        if (headerRowIndex == -1) {
-            System.err.println("未找到表头行（文件: " + excelFile.getName() + "）");
-            workbook.close();
-            return;
-        }
-
-        // 2. 查找货号和单价列的索引
-        Row headerRow = sheet.getRow(headerRowIndex);
-        int skuColumn = -1; // 货号列索引
-        int priceColumn = -1; // 单价列索引
-        for (Cell cell : headerRow) {
-            if (skuColumn != -1 && priceColumn != -1) {
-                break;
-            }
-            String header = getCellValueAsString(cell); // 获取单元格值
-            if (header.equals("货号") || header.equals("商品编号")||header.contains("名称")) {
-                skuColumn = cell.getColumnIndex();
-            } else if (header.contains("单价") || header.contains("价格")) {
-                priceColumn = cell.getColumnIndex();
-            }
-        }
-
-        if (skuColumn == -1 || priceColumn == -1) {
-            System.err.println("未找到货号或单价列（文件: " + excelFile.getName() + "）");
-            workbook.close();
-            return;
-        }
-
-        // 3. 提取数据
-        for (int i = headerRowIndex + 1; i <= sheet.getLastRowNum(); i++) {
-            Row row = sheet.getRow(i);
-            if (row == null) {
-                continue; // 跳过空行
-            }
-
-            Cell skuCell = row.getCell(skuColumn); // 货号列
-            Cell priceCell = row.getCell(priceColumn); // 价格列
-
-            if (skuCell == null || priceCell == null) {
-                continue; // 跳过空单元格
-            }
-
-            // 提取货号（兼容字符串和数值类型）
-            String sku = getCellValueAsString(skuCell).trim();
-
-            // 忽略货号为空的行
-            if (sku.isEmpty()) {
-                continue;
-            }
-
-            // 提取价格（兼容字符串和数值类型）
-            double price;
-            try {
-                price = getCellValueAsNumeric(priceCell);
-            } catch (NumberFormatException e) {
-                System.err.println("价格格式错误（货号: " + sku + ", 文件: " + excelFile.getName() + "）: " + e.getMessage());
-                continue;
-            }
-
-            // 保存有效数据
-            if (price <= 100) {
-                priceMap.put(sku, price);
-            } else {
-                System.err.println("忽略超过100元的价格（货号: " + sku + ", 价格: " + price + "）");
-            }
-        }
-
-        workbook.close();
     }
 
     /**
@@ -176,7 +202,7 @@ public class readPriceFromExcel {
             }
             for (Cell cell : row) {
                 String cellValue = getCellValueAsString(cell);
-                if (cellValue.contains("货号") || cellValue.equals("商品编号") || cellValue.equals("单价") || cellValue.equals("价格")|| cellValue.contains("名称")) {
+                if (cellValue.contains("货号") || cellValue.equals("商品编号") || cellValue.equals("单价") || cellValue.equals("价格") || cellValue.contains("名称")) {
                     return i; // 返回表头行索引
                 }
             }
@@ -257,7 +283,12 @@ public class readPriceFromExcel {
         // 保存文件
         try (FileOutputStream fileOutputStream = new FileOutputStream(outputFilePath)) {
             workbook.write(fileOutputStream);
+        } finally {
+            try {
+                workbook.close();
+            } catch (IOException e) {
+                System.err.println("关闭汇总工作簿时发生错误: " + e.getMessage());
+            }
         }
-        workbook.close();
     }
 }

@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 public class PreviewWindow extends JFrame {
     private ArrayList<String> dataList;
@@ -103,17 +102,16 @@ public class PreviewWindow extends JFrame {
         File root = new File(imageSearchFolder);
         Map<String, String> itemToNewFileNameMap = new LinkedHashMap<>();
         for (String data : dataList) {
-            boolean found = false;
+            Double price = null;
+            for (Map.Entry<String, Double> entry : priceMap.entrySet()) {
+                if (entry.getKey().contains(data)) {
+                    price = entry.getValue();
+                    break;
+                }
+            }
+
             FileInfo recentFile = FileSearchUtil.searchRecentFile(root, data);
             if (recentFile != null) {
-                found = true;
-                Double price = null;
-                for (Map.Entry<String, Double> entry : priceMap.entrySet()) {
-                    if (entry.getKey().contains(data)) {
-                        price = entry.getValue();
-                        break;
-                    }
-                }
                 String newFileName;
                 if (price != null) {
                     newFileName = data + "_" + price + "." + FileUtils.getFileExtension(new File(recentFile.filePath).getName());
@@ -124,9 +122,14 @@ public class PreviewWindow extends JFrame {
                 Files.copy(new File(recentFile.filePath).toPath(), targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 itemToNewFileNameMap.put(data, newFileName);
                 feedbackArea.append("货号: " + data + ", 价格: " + (price != null ? price : "未找到") + ", 来源: " + recentFile.filePath + ", 状态: 已检索到\n");
-            }
-            if (!found) {
-                feedbackArea.append("货号: " + data + ", 价格: 未找到, 来源: 未找到, 状态: 未检索到\n");
+            } else {
+                if (price != null) {
+                    feedbackArea.append("货号: " + data + ", 价格: " + price + ", 来源: 未找到, 状态: 图片未检索到\n");
+                    itemToNewFileNameMap.put(data, "未找到图片");
+                } else {
+                    feedbackArea.append("货号: " + data + ", 价格: 未找到, 来源: 未找到, 状态: 图片和价格均未检索到\n");
+                    itemToNewFileNameMap.put(data, "未找到图片");
+                }
             }
         }
         return itemToNewFileNameMap;
@@ -147,10 +150,29 @@ public class PreviewWindow extends JFrame {
         for (Map.Entry<String, String> entry : itemToNewFileNameMap.entrySet()) {
             String data = entry.getKey();
             String newFileName = entry.getValue();
-            String[] parts = newFileName.split("_");
-            String price = parts.length > 1 ? parts[1].replace("." + FileUtils.getFileExtension(newFileName), "") : "未找到";
-            String imagePath = targetFolder.getAbsolutePath() + File.separator + newFileName;
-            model.addRow(new Object[]{index++, imagePath, data, price});
+            String priceStr = "未找到";
+            if (!newFileName.equals("未找到图片")) {
+                String[] parts = newFileName.split("_");
+                if (parts.length > 1) {
+                    priceStr = parts[1].replace("." + FileUtils.getFileExtension(newFileName), "");
+                }
+            } else {
+                // 检查价格是否找到
+                Map<String, Double> priceMap = PriceReader.readPriceFromExcel(priceDatabaseFile);
+                for (Map.Entry<String, Double> priceEntry : priceMap.entrySet()) {
+                    if (priceEntry.getKey().contains(data)) {
+                        priceStr = String.valueOf(priceEntry.getValue());
+                        break;
+                    }
+                }
+            }
+            String imagePath;
+            if (newFileName.equals("未找到图片")) {
+                imagePath = "未找到图片";
+            } else {
+                imagePath = targetFolder.getAbsolutePath() + File.separator + newFileName;
+            }
+            model.addRow(new Object[]{index++, imagePath, data, priceStr});
         }
         return model;
     }
@@ -247,6 +269,10 @@ public class PreviewWindow extends JFrame {
     }
 
     private void insertImage(Sheet sheet, int rowIndex, int colIndex, String imagePath, Workbook workbook) {
+        if (imagePath.equals("未找到图片")) {
+            sheet.getRow(rowIndex).getCell(colIndex).setCellValue("未找到图片");
+            return;
+        }
         try (InputStream inputStream = new FileInputStream(imagePath)) {
             byte[] bytes = IOUtils.toByteArray(inputStream);
             int pictureIdx = workbook.addPicture(bytes, Workbook.PICTURE_TYPE_JPEG);
