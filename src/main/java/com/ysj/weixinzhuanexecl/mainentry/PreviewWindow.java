@@ -28,6 +28,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class PreviewWindow extends JFrame {
+    private static final String EXCEL_FILE_NAME = "preview_data.xlsx";
+    private static final String DATE_FORMAT = "yyyyMMdd";
+
     private ArrayList<String> dataList;
     private String imageSearchFolder;
     private String priceDatabaseFile;
@@ -69,8 +72,9 @@ public class PreviewWindow extends JFrame {
         });
 
         // 生成预览数据
-        Map<String, String> itemToNewFileNameMap = generatePreviewData();
-        tableModel = generateTableModel(itemToNewFileNameMap);
+        Map<String, Double> priceMap = PriceReader.readPriceFromExcel(priceDatabaseFile);
+        Map<String, String> itemToNewFileNameMap = generatePreviewData(priceMap);
+        tableModel = generateTableModel(itemToNewFileNameMap, priceMap);
         previewTable = new JTable(tableModel);
         JScrollPane tableScrollPane = new JScrollPane(previewTable);
         add(tableScrollPane, BorderLayout.CENTER);
@@ -88,10 +92,8 @@ public class PreviewWindow extends JFrame {
         add(buttonPanel, BorderLayout.SOUTH);
     }
 
-    private Map<String, String> generatePreviewData() throws IOException {
-        Map<String, Double> priceMap = PriceReader.readPriceFromExcel(priceDatabaseFile);
-
-        SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd");
+    private Map<String, String> generatePreviewData(Map<String, Double> priceMap) {
+        SimpleDateFormat sdf = new SimpleDateFormat(DATE_FORMAT);
         String targetFolderName = sdf.format(new Date()) + "施美毛巾";
         File targetFolder = new File(targetFolderName);
         if (!targetFolder.exists()) {
@@ -102,15 +104,22 @@ public class PreviewWindow extends JFrame {
         File root = new File(imageSearchFolder);
         Map<String, String> itemToNewFileNameMap = new LinkedHashMap<>();
         for (String data : dataList) {
-            Double price = null;
-            for (Map.Entry<String, Double> entry : priceMap.entrySet()) {
-                if (entry.getKey().contains(data)) {
-                    price = entry.getValue();
-                    break;
+            Double price = priceMap.get(data);
+            if (price==null){
+                for (Map.Entry<String, Double> entry : priceMap.entrySet()) {
+                    if (entry.getKey().contains(data)) {
+                        price = entry.getValue();
+                        break;
+                    }
                 }
             }
+            FileInfo recentFile = null;
+            try {
+                recentFile = FileSearchUtil.searchRecentFile(root, data);
+            } catch (Exception e) {
+                feedbackArea.append("搜索图片文件时出错（货号: " + data + "）: " + e.getMessage() + "\n");
+            }
 
-            FileInfo recentFile = FileSearchUtil.searchRecentFile(root, data);
             if (recentFile != null) {
                 String newFileName;
                 if (price != null) {
@@ -119,7 +128,11 @@ public class PreviewWindow extends JFrame {
                     newFileName = data + "." + FileUtils.getFileExtension(new File(recentFile.filePath).getName());
                 }
                 File targetFile = new File(targetFolder.getAbsolutePath() + File.separator + newFileName);
-                Files.copy(new File(recentFile.filePath).toPath(), targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    Files.copy(new File(recentFile.filePath).toPath(), targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException e) {
+                    feedbackArea.append("复制文件出错（货号: " + data + ", 来源: " + recentFile.filePath + "）: " + e.getMessage() + "\n");
+                }
                 itemToNewFileNameMap.put(data, newFileName);
                 feedbackArea.append("货号: " + data + ", 价格: " + (price != null ? price : "未找到") + ", 来源: " + recentFile.filePath + ", 状态: 已检索到\n");
             } else {
@@ -135,14 +148,14 @@ public class PreviewWindow extends JFrame {
         return itemToNewFileNameMap;
     }
 
-    private DefaultTableModel generateTableModel(Map<String, String> itemToNewFileNameMap) {
+    private DefaultTableModel generateTableModel(Map<String, String> itemToNewFileNameMap, Map<String, Double> priceMap) {
         DefaultTableModel model = new DefaultTableModel();
         model.addColumn("序号");
         model.addColumn("图片");
         model.addColumn("货号");
         model.addColumn("价格");
 
-        SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd");
+        SimpleDateFormat sdf = new SimpleDateFormat(DATE_FORMAT);
         String targetFolderName = sdf.format(new Date()) + "施美毛巾";
         File targetFolder = new File(targetFolderName);
 
@@ -158,7 +171,6 @@ public class PreviewWindow extends JFrame {
                 }
             } else {
                 // 检查价格是否找到
-                Map<String, Double> priceMap = PriceReader.readPriceFromExcel(priceDatabaseFile);
                 for (Map.Entry<String, Double> priceEntry : priceMap.entrySet()) {
                     if (priceEntry.getKey().contains(data)) {
                         priceStr = String.valueOf(priceEntry.getValue());
@@ -243,11 +255,11 @@ public class PreviewWindow extends JFrame {
             }
         }
 
-        try (FileOutputStream outputStream = new FileOutputStream(new File("preview_data.xlsx"))) {
+        try (FileOutputStream outputStream = new FileOutputStream(new File(EXCEL_FILE_NAME))) {
             workbook.write(outputStream);
-            feedbackArea.append("Excel 文件已保存为 preview_data.xlsx\n");
+            feedbackArea.append("Excel 文件已保存为 " + EXCEL_FILE_NAME + "\n");
             // 尝试打开生成的 Excel 文件
-            File excelFile = new File("preview_data.xlsx");
+            File excelFile = new File(EXCEL_FILE_NAME);
             if (excelFile.exists()) {
                 try {
                     if (Desktop.isDesktopSupported()) {
@@ -275,7 +287,13 @@ public class PreviewWindow extends JFrame {
         }
         try (InputStream inputStream = new FileInputStream(imagePath)) {
             byte[] bytes = IOUtils.toByteArray(inputStream);
-            int pictureIdx = workbook.addPicture(bytes, Workbook.PICTURE_TYPE_JPEG);
+            int pictureType;
+            if (imagePath.toLowerCase().endsWith(".png")) {
+                pictureType = Workbook.PICTURE_TYPE_PNG;
+            } else {
+                pictureType = Workbook.PICTURE_TYPE_JPEG;
+            }
+            int pictureIdx = workbook.addPicture(bytes, pictureType);
             Drawing<?> drawing = sheet.createDrawingPatriarch();
             ClientAnchor anchor = new XSSFClientAnchor(0, 0, 0, 0, colIndex, rowIndex, colIndex + 1, rowIndex + 1);
 
